@@ -9,3 +9,4 @@ Our system simulates a blood and sickle cell donor matching and inventory platfo
 ## Documentation
 
 - [Project Description](docs/PROJECT.md)
+- [Services](docs/SERVICES.md)
