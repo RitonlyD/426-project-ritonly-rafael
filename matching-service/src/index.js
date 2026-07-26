@@ -46,7 +46,7 @@ const getAvailability = async (query) => {
     console.warn(
       `[matching] availability lookup failed (${err.message}); synthetic fallback`,
     );
-    return { source: "synthetic-fallback", donors: rand(4), units: rand(6) };
+    return { source: "synthetic-fallback", donors: random(4), units: random(6) };
   }
 };
 
@@ -70,7 +70,7 @@ const buildMatch = (request, availability) => {
     return {
       ...common,
       donorId: `DN-${1000 + random(9000)}`,
-      distanceKM: Number((match.random() * 40).toFixed(1)),
+      distanceKM: Number((Math.random() * 40).toFixed(1)),
       readyBy: new Date(Date.now() + 3_600_000).toISOString(),
     };
   }

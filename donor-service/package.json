@@ -1,0 +1,5 @@
+{
+  "name": "donor-service",
+  "type": "module",
+  "private": true
+}
