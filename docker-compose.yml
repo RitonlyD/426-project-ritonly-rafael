@@ -1,4 +1,6 @@
 services:
+  caddy:
+    image: caddy:2
   redis:
     image: redis:7-alpine
     healthcheck:
@@ -11,6 +13,21 @@ services:
     build: ./matching-service
     ports:
       - "4000:4000"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile
+    depends_on:
+      matching-service-a:
+        condition: service_healthy
+      matching-service-b:
+        condition: service_healthy
+      matching-service-c:
+        condition: service_healthy
+
+  matching-service-a:
+    build: ./matching-service
+    environment:
+      - REPLICA=a
+      - AVAILABILITY_URL=http://matching-ambassador:5000/availability
     healthcheck:
       test:
         [
@@ -22,13 +39,53 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    depends_on:
+      matching-ambassador:
+        condition: service_started
+
+  matching-service-b:
+    build: ./matching-service
+    environment:
+      - REPLICA=b
+      - AVAILABILITY_URL=http://matching-ambassador:5000/availability
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      matching-ambassador:
+        condition: service_started
+
+  matching-service-c:
+    build: ./matching-service
+    environment:
+      - REPLICA=c
+      - AVAILABILITY_URL=http://matching-ambassador:5000/availability
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      matching-ambassador:
+        condition: service_started
 
   matching-ambassador:
     build: ./matching-ambassador
-    network_mode: "service:matching-service"
     depends_on:
-      matching-service:
-        condition: service_started
       donor-service:
         condition: service_healthy
       # inventory-service not built until Sprint 4; re-add once it exists
