@@ -1,6 +1,15 @@
 import http from "node:http";
+import { createClient } from "redis";
 
 const PORT = process.env.PORT || 5100;
+const REDIS_URL = process.env.REDIS_URL || "redis://redis:6379";
+const CACHE_TTL_SECONDS = 20;
+
+const redisClient = createClient({ url: REDIS_URL });
+redisClient.on("error", (err) =>
+  console.error(`[donor-service] redis error: ${err.message}`),
+);
+await redisClient.connect();
 
 const BLOOD_TYPES = ["O-", "O+", "A-", "A+", "B-", "B+", "AB-", "AB+"];
 const ANTIGENS = [
@@ -72,19 +81,34 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && path === "/donors/available") {
-    const bloodType = url.searchParams.get("bloodType");
+    const bloodType = url.searchParams.get("bloodType") || "any";
+    const cacheKey = `donors:available:${bloodType}`;
+
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      console.log(`[donor-service] cache HIT ${cacheKey}`);
+      return send(res, 200, { ...JSON.parse(cached), cache: "HIT" });
+    }
+
+    console.log(`[donor-service] cache MISS ${cacheKey}`);
     const latencyMS = await simulateLookupLatency();
 
     const matches = donors.filter(
-      (d) => d.available && (!bloodType || d.bloodType === bloodType),
+      (d) => d.available && (bloodType === "any" || d.bloodType === bloodType),
     );
 
-    return send(res, 200, {
-      bloodType: bloodType || "any",
+    const result = {
+      bloodType,
       available: matches.length,
       donors: matches.slice(0, 5),
       latencyMS,
+    };
+
+    await redisClient.set(cacheKey, JSON.stringify(result), {
+      EX: CACHE_TTL_SECONDS,
     });
+
+    return send(res, 200, { ...result, cache: "MISS" });
   }
 
   const availabilityMatch = path.match(/^\/donors\/([^/]+)\/availability$/);
