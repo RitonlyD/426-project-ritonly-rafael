@@ -5,6 +5,7 @@ const DONOR_URL = __ENV.DONOR_URL || "http://localhost:5100";
 const BLOOD_TYPES = ["O-", "O+", "A+", "B-"];
 
 export const options = {
+  summaryTrendStats: ["avg", "min", "med", "p(90)", "p(95)", "p(99)", "max"],
   scenarios: {
     donor_cache: {
       executor: "constant-vus",
