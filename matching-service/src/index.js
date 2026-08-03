@@ -2,7 +2,8 @@ import http from "node:http";
 
 const PORT = process.env.PORT || 4000;
 const AVAILABILITY_URL =
-  process.env.AVAILABILITY_URL || "http://localhost:5000/availability"; // amb pattern, sharing this and listening on localhost:5000
+  process.env.AVAILABILITY_URL ||
+  "http://matching-ambassador:5000/availability"; // amb pattern, sharing this and listening on localhost:5000
 
 const simulateDBLatency = () => {
   const ms = 120 + Math.floor(Math.random() * 380);
@@ -46,7 +47,11 @@ const getAvailability = async (query) => {
     console.warn(
       `[matching] availability lookup failed (${err.message}); synthetic fallback`,
     );
-    return { source: "synthetic-fallback", donors: random(4), units: random(6) };
+    return {
+      source: "synthetic-fallback",
+      donors: random(4),
+      units: random(6),
+    };
   }
 };
 
@@ -123,6 +128,7 @@ const server = http.createServer(async (req, res) => {
     const latencyMS = await simulateDBLatency();
     return send(res, 200, {
       requestId: `req-${Math.random().toString(16).slice(2, 10)}`,
+      servedBy: process.env.REPLICA || process.env.HOSTNAME || "unknown", // which replica answered
       patient: request,
       match: buildMatch(request, availability),
       matchedAt: new Date().toISOString(),
