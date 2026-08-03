@@ -1,4 +1,12 @@
 services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   matching-service:
     build: ./matching-service
     ports:
@@ -31,6 +39,9 @@ services:
     build: ./donor-service
     ports:
       - "5100:5100"
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test:
         [
