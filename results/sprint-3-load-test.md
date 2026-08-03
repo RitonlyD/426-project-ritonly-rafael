@@ -34,10 +34,3 @@ see a lower hit rate and a worse p95/p99. To reliably clear p99, the next
 change would be lowering the miss-path latency ceiling or lengthening the
 TTL, not anything about the caching approach itself.
 
-## matching-service — POST /match via Caddy (pending)
-
-Not yet measured — this scenario depends on the Caddy + replica setup
-(Sprint 3 deliverable 1), which isn't merged yet. Once that lands, add a
-`match_via_caddy` scenario to `load-tests/sprint-3-load.js` and fill in this
-section with matching-service's own SLO comparison (1000ms p95 / 2000ms p99
-latency, 99% success rate).
