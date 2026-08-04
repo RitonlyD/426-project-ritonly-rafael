@@ -34,7 +34,7 @@ export const options = {
 export function donorCache() {
   const bloodType = BLOOD_TYPES[Math.floor(Math.random() * BLOOD_TYPES.length)];
   const res = http.get(
-    `${DONOR_URL}/donors/available?bloodType=${bloodType}`,
+    `${DONOR_URL}/donors/available?bloodType=${encodeURIComponent(bloodType)}`,
     { tags: { scenario: "donor_cache" } },
   );
   check(res, { "status is 200": (r) => r.status === 200 });
