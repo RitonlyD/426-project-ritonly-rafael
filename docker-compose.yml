@@ -8,11 +8,9 @@ services:
       retries: 5
 
   caddy:
-    image: caddy:2
+    build: ./caddy
     ports:
       - "4000:4000"
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile
     depends_on:
       matching-service-a:
         condition: service_healthy
