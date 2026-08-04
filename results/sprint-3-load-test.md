@@ -40,36 +40,39 @@ Test: `load-tests/sprint-3-load.js`, `match_through_caddy` scenario — 10 VUs,
 30s, requests sent to Caddy on :4000 and load-balanced across the three
 `matching-service` replicas.
 
-Results (k6, 2026-08-04):
+Results (k6, 2026-08-04, re-measured against a fresh stack):
 
-- p50: 1.13s
-- p95: 1.28s
-- p99: 1.3s
-- Request rate: 4.97 req/s (149 requests / 30s)
-- Error rate: 0% (0 of 149 requests failed; all checks passed)
+- p50: 337ms
+- p95: 543ms
+- p99: 752ms
+- Request rate: 7.53 req/s (226 requests / 30s)
+- Error rate: 0% (0 of 226 requests failed; all checks passed)
+
+Numbers were reproduced across four separate 30s runs (isolated and combined
+with the donor_cache scenario); p95 landed between 490-543ms and p99 between
+666-752ms each time.
 
 SLO comparison (docs/SLO.md, matching-service):
 
-- Latency SLO (p95 < 1000ms, p99 < 2000ms): p99 met (1.3s), p95 not met
-  (1.28s vs. a 1000ms target).
+- Latency SLO (p95 < 1000ms, p99 < 2000ms): both met, with meaningful
+  headroom (p95 543ms vs. 1000ms target; p99 752ms vs. 2000ms target).
 - Reliability SLO (99% success): met — 100% success at this load level.
 
-Interpretation: every request lands in a narrow 1.1-1.3s band regardless of
-urgency or blood type, which is the signature of a fixed cost applied to
-every request rather than variance in matching-service's own work.
-Tracing it down: matching-ambassador's `/availability` handler awaits the
-donor-service lookup and then, sequentially, an inventory-service lookup
-with up to 3 retries at a 700ms timeout each — but inventory-service isn't
-built yet (deferred to Sprint 4), so that call always fails and eats a
-chunk of that timeout budget before falling back. That's added on top of
-matching-service's own 120-500ms simulated latency, which is enough by
-itself to explain why p95 clears the p99 target (2000ms) comfortably but
-misses the tighter p95 target (1000ms). The bottleneck isn't Caddy or the
+Interpretation: matching-ambassador's `/availability` handler awaits the
+donor-service lookup, then an inventory-service lookup with up to 3 retries
+at a 700ms timeout each. inventory-service isn't built yet (deferred to
+Sprint 4), so it was expected that this retry loop would dominate latency —
+but the ambassador's own logs show each attempt failing with `fetch failed`
+(a DNS resolution error) in a few milliseconds, not after the full 700ms
+timeout, so the three retries add negligible latency in practice. The real
+fixed cost is simpler: matching-service's own 120-500ms simulated latency,
+awaited sequentially after the ambassador round trip (which itself ranges
+~1-300ms depending on whether donor-service's cache hits). That sum lines up
+with the observed 337-543ms band. The bottleneck isn't Caddy or the
 replicas — round-robining across three instances didn't change per-request
-latency, it just added throughput headroom — it's the ambassador's
-unconditional, sequential call to a service that doesn't exist yet. Sprint
-5's async + resilience work should either short-circuit or parallelize
-(`Promise.all`) the donor/inventory calls instead of awaiting them one
-after another; that alone should bring p95 back under target without
-touching the replication or caching patterns.
+latency, it just added throughput headroom. If inventory-service is added in
+Sprint 4 and its retry timeouts start actually being hit (real network calls
+instead of instant DNS failures), that unconditional sequential await is
+what would push p95 toward the SLO line; parallelizing the donor/inventory
+calls (`Promise.all`) now would remove that risk pre-emptively.
 
