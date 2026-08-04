@@ -1,6 +1,4 @@
 services:
-  caddy:
-    image: caddy:2
   redis:
     image: redis:7-alpine
     healthcheck:
@@ -9,8 +7,8 @@ services:
       timeout: 3s
       retries: 5
 
-  matching-service:
-    build: ./matching-service
+  caddy:
+    image: caddy:2
     ports:
       - "4000:4000"
     volumes:
