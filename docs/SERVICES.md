@@ -11,36 +11,34 @@ inventory-service: Keeps a track of 'Blood Units' by blood type and phenotype at
 Services built as of Sprint 3: `donor-service` and `matching-service`,
 connected through the `matching-ambassador` (ambassador pattern sitting in
 front of `matching-service`). `donor-service` now caches its availability
-lookups in Redis (cache-aside, keyed by blood type). `matching-service` is
-being placed behind Caddy as a load balancer across replicas this sprint,
-shown as planned until that lands. `inventory-service` is not built yet
-(deferred to Sprint 4) and is shown as planned only.
+lookups in Redis (cache-aside, keyed by blood type). `matching-service` now
+runs as three replicas (`matching-service-a/b/c`) behind Caddy, which
+load-balances incoming requests round-robin across them. `inventory-service`
+is not built yet (deferred to Sprint 4) and is shown as planned only.
 
 ```mermaid
 flowchart LR
     Client([Clinic staff / client])
 
-    subgraph Caddy_LB[Caddy load balancer - planned]
+    subgraph Caddy_LB[Caddy load balancer]
         direction LR
-        Matching1[matching-service #1]
-        Matching2[matching-service #2]
+        MatchingA[matching-service-a]
+        MatchingB[matching-service-b]
+        MatchingC[matching-service-c]
     end
 
-    subgraph matching-service pod
-        Ambassador[matching-ambassador]
-    end
-
+    Ambassador[matching-ambassador]
     Donor[donor-service]
     DonorCache[(Redis cache)]
     Inventory[inventory-service<br/>planned - Sprint 4]
 
     Client -->|POST /match| Caddy_LB
-    Matching1 -->|GET /availability| Ambassador
-    Matching2 -->|GET /availability| Ambassador
+    MatchingA -->|GET /availability| Ambassador
+    MatchingB -->|GET /availability| Ambassador
+    MatchingC -->|GET /availability| Ambassador
     Ambassador -->|GET /donors/available| Donor
     Donor <-->|cache-aside| DonorCache
     Ambassador -.->|GET /inventory| Inventory
 
     style Inventory stroke-dasharray: 5 5
-    style Caddy_LB stroke-dasharray: 5 5
 ```
