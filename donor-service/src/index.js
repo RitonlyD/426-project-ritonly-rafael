@@ -54,6 +54,8 @@ const makeDonor = (id) => ({
 
 const donors = Array.from({ length: 40 }, (_, i) => makeDonor(i));
 
+let failMode = false;
+
 const readJSON = (req) =>
   new Promise((resolve) => {
     let body = "";
@@ -80,7 +82,18 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { status: "ok", service: "donor-service" });
   }
 
+  if (req.method === "POST" && path === "/admin/fail") {
+    failMode = !failMode;
+    console.log(`[donor-service] fail mode ${failMode ? "ON" : "OFF"}`);
+    return send(res, 200, { failMode });
+  }
+
   if (req.method === "GET" && path === "/donors/available") {
+    if (failMode) {
+      console.log("[donor-service] fail mode active, returning 503");
+      return send(res, 503, { error: "donor-service unavailable" });
+    }
+
     const bloodType = url.searchParams.get("bloodType") || "any";
     const cacheKey = `donors:available:${bloodType}`;
 
