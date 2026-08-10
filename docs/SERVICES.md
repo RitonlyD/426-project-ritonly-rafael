@@ -8,13 +8,23 @@ inventory-service: Keeps a track of 'Blood Units' by blood type and phenotype at
 
 ## System Diagram
 
-Services built as of Sprint 3: `donor-service` and `matching-service`,
+Services built as of Sprint 4: `donor-service`, `matching-service`, and
+`inventory-service` (now built — previously shown as planned only),
 connected through the `matching-ambassador` (ambassador pattern sitting in
-front of `matching-service`). `donor-service` now caches its availability
-lookups in Redis (cache-aside, keyed by blood type). `matching-service` now
+front of `matching-service`). `donor-service` caches its availability
+lookups in Redis (cache-aside, keyed by blood type). `matching-service`
 runs as three replicas (`matching-service-a/b/c`) behind Caddy, which
-load-balances incoming requests round-robin across them. `inventory-service`
-is not built yet (deferred to Sprint 4) and is shown as planned only.
+load-balances incoming requests round-robin across them; those replicas now
+gate on `matching-ambassador`'s own health check rather than just its
+startup.
+
+Sprint 4 adds an asynchronous path alongside the existing synchronous
+request/response flow: when a match resolves to an `inventory_unit`,
+`matching-service` publishes a `reserve-unit` message to a RabbitMQ work
+queue instead of reserving it synchronously, and logs the enqueue.
+`inventory-service` consumes that queue independently, applies the
+reservation, logs processing, and acks — the match response returns to the
+client without waiting on the reservation write.
 
 ```mermaid
 flowchart LR
@@ -30,15 +40,19 @@ flowchart LR
     Ambassador[matching-ambassador]
     Donor[donor-service]
     DonorCache[(Redis cache)]
-    Inventory[inventory-service<br/>planned - Sprint 4]
+    Inventory[inventory-service]
+    Queue[(RabbitMQ<br/>reserve-unit queue)]
 
     Client -->|POST /match| Caddy_LB
     MatchingA -->|GET /availability| Ambassador
     MatchingB -->|GET /availability| Ambassador
     MatchingC -->|GET /availability| Ambassador
     Ambassador -->|GET /donors/available| Donor
+    Ambassador -->|GET /inventory| Inventory
     Donor <-->|cache-aside| DonorCache
-    Ambassador -.->|GET /inventory| Inventory
 
-    style Inventory stroke-dasharray: 5 5
+    MatchingA -.->|publish reserve-unit| Queue
+    MatchingB -.->|publish reserve-unit| Queue
+    MatchingC -.->|publish reserve-unit| Queue
+    Queue -.->|consume, apply, ack| Inventory
 ```
