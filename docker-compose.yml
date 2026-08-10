@@ -37,7 +37,7 @@ services:
       retries: 5
     depends_on:
       matching-ambassador:
-        condition: service_started
+        condition: service_healthy
 
   matching-service-b:
     build: ./matching-service
@@ -57,7 +57,7 @@ services:
       retries: 5
     depends_on:
       matching-ambassador:
-        condition: service_started
+        condition: service_healthy
 
   matching-service-c:
     build: ./matching-service
@@ -77,10 +77,21 @@ services:
       retries: 5
     depends_on:
       matching-ambassador:
-        condition: service_started
+        condition: service_healthy
 
   matching-ambassador:
     build: ./matching-ambassador
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:5000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     depends_on:
       donor-service:
         condition: service_healthy
