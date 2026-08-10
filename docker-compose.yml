@@ -46,6 +46,8 @@ services:
     depends_on:
       matching-ambassador:
         condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   matching-service-b:
     build: ./matching-service
@@ -66,6 +68,8 @@ services:
     depends_on:
       matching-ambassador:
         condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   matching-service-c:
     build: ./matching-service
@@ -86,6 +90,8 @@ services:
     depends_on:
       matching-ambassador:
         condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   matching-ambassador:
     build: ./matching-ambassador

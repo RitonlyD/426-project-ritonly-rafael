@@ -1,9 +1,19 @@
 import http from "node:http";
+import amqp from "amqplib";
 
 const PORT = process.env.PORT || 4000;
 const AVAILABILITY_URL =
   process.env.AVAILABILITY_URL ||
   "http://matching-ambassador:5000/availability"; // amb pattern, sharing this and listening on localhost:5000
+const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://rabbitmq:5672";
+const RESERVE_UNIT_QUEUE = "reserve-unit";
+
+const rabbitConnection = await amqp.connect(RABBITMQ_URL);
+rabbitConnection.on("error", (err) =>
+  console.error(`[matching-service] rabbitmq error: ${err.message}`),
+);
+const rabbitChannel = await rabbitConnection.createChannel();
+await rabbitChannel.assertQueue(RESERVE_UNIT_QUEUE, { durable: true });
 
 const simulateDBLatency = () => {
   const ms = 120 + Math.floor(Math.random() * 380);
@@ -126,11 +136,32 @@ const server = http.createServer(async (req, res) => {
 
     const availability = await getAvailability(request);
     const latencyMS = await simulateDBLatency();
+    const requestId = `req-${Math.random().toString(16).slice(2, 10)}`;
+    const match = buildMatch(request, availability);
+
+    if (match.matchType === "inventory_unit") {
+      const reserveMessage = {
+        requestId,
+        unitId: match.unitId,
+        bloodType: match.bloodType,
+        clinic: match.clinic,
+        queuedAt: new Date().toISOString(),
+      };
+      rabbitChannel.sendToQueue(
+        RESERVE_UNIT_QUEUE,
+        Buffer.from(JSON.stringify(reserveMessage)),
+        { persistent: true },
+      );
+      console.log(
+        `[matching-service] enqueued reserve-unit requestId=${requestId} unitId=${match.unitId}`,
+      );
+    }
+
     return send(res, 200, {
-      requestId: `req-${Math.random().toString(16).slice(2, 10)}`,
+      requestId,
       servedBy: process.env.REPLICA || process.env.HOSTNAME || "unknown", // which replica answered
       patient: request,
-      match: buildMatch(request, availability),
+      match,
       matchedAt: new Date().toISOString(),
       latencyMS,
     });
