@@ -99,6 +99,9 @@ services:
     build: ./inventory-service
     ports:
       - "5200:5200"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
     healthcheck:
       test:
         [

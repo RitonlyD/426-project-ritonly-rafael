@@ -1,6 +1,9 @@
 import http from "node:http";
+import amqp from "amqplib";
 
 const PORT = process.env.PORT || 5200;
+const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://rabbitmq:5672";
+const RESERVE_UNIT_QUEUE = "reserve-unit";
 
 const BLOOD_TYPES = ["O-", "O+", "A-", "A+", "B-", "B+", "AB-", "AB+"];
 const ANTIGENS = [
@@ -44,6 +47,60 @@ const makeUnit = (id) => ({
 
 const units = Array.from({ length: 60 }, (_, i) => makeUnit(i));
 const reservations = new Map();
+
+// Shared by the sync POST /inventory/reserve endpoint and the async
+// reserve-unit consumer, both of which apply the same idempotent
+// reservation semantics keyed by a caller-supplied key.
+const applyReservation = (key, { unitId, bloodType }) => {
+  if (reservations.has(key)) {
+    return { result: reservations.get(key), replayed: true };
+  }
+
+  const unit = unitId
+    ? units.find((u) => u.unitId === unitId && !u.reserved)
+    : units.find((u) => u.bloodType === bloodType && !u.reserved);
+
+  if (!unit) {
+    const result = { reserved: false, error: "no matching unit available" };
+    reservations.set(key, result);
+    return { result, replayed: false };
+  }
+
+  unit.reserved = true;
+  const result = {
+    reserved: true,
+    unitId: unit.unitId,
+    bloodType: unit.bloodType,
+    clinic: unit.clinic,
+  };
+  reservations.set(key, result);
+  return { result, replayed: false };
+};
+
+const rabbitConnection = await amqp.connect(RABBITMQ_URL);
+rabbitConnection.on("error", (err) =>
+  console.error(`[inventory-service] rabbitmq error: ${err.message}`),
+);
+const rabbitChannel = await rabbitConnection.createChannel();
+await rabbitChannel.assertQueue(RESERVE_UNIT_QUEUE, { durable: true });
+
+rabbitChannel.consume(RESERVE_UNIT_QUEUE, (msg) => {
+  if (!msg) return;
+
+  const message = JSON.parse(msg.content.toString());
+  console.log(
+    `[inventory-service] processing reserve-unit requestId=${message.requestId} unitId=${message.unitId}`,
+  );
+
+  const { result } = applyReservation(message.requestId, message);
+  console.log(
+    result.reserved
+      ? `[inventory-service] reserve-unit applied requestId=${message.requestId} unitId=${result.unitId}`
+      : `[inventory-service] reserve-unit failed requestId=${message.requestId}: ${result.error}`,
+  );
+
+  rabbitChannel.ack(msg);
+});
 
 const readJSON = (req) =>
   new Promise((resolve) => {
@@ -95,30 +152,18 @@ const server = http.createServer(async (req, res) => {
       return send(res, 400, { error: "idempotencyKey is required" });
     }
 
-    if (reservations.has(idempotencyKey)) {
+    const { result, replayed } = applyReservation(idempotencyKey, body);
+
+    if (replayed) {
       console.log(`[inventory-service] replayed reservation ${idempotencyKey}`);
-      return send(res, 200, reservations.get(idempotencyKey));
+      return send(res, 200, result);
     }
 
-    const unit = body.unitId
-      ? units.find((u) => u.unitId === body.unitId && !u.reserved)
-      : units.find((u) => u.bloodType === body.bloodType && !u.reserved);
-
-    if (!unit) {
-      const result = { reserved: false, error: "no matching unit available" };
-      reservations.set(idempotencyKey, result);
+    if (!result.reserved) {
       return send(res, 409, result);
     }
 
-    unit.reserved = true;
-    const result = {
-      reserved: true,
-      unitId: unit.unitId,
-      bloodType: unit.bloodType,
-      clinic: unit.clinic,
-    };
-    reservations.set(idempotencyKey, result);
-    console.log(`[inventory-service] reserved ${unit.unitId}`);
+    console.log(`[inventory-service] reserved ${result.unitId}`);
     return send(res, 200, result);
   }
 
