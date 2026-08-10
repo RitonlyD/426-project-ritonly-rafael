@@ -84,9 +84,24 @@ services:
     depends_on:
       donor-service:
         condition: service_healthy
-      # inventory-service not built until Sprint 4; re-add once it exists
-      # inventory-service:
-      #   condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+
+  inventory-service:
+    build: ./inventory-service
+    ports:
+      - "5200:5200"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:5200/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   donor-service:
     build: ./donor-service
@@ -106,5 +121,3 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-#inventory-service: #shared service: to do in later sprint
