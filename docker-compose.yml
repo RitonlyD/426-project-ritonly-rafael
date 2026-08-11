@@ -46,6 +46,8 @@ services:
     depends_on:
       matching-ambassador:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
   matching-service-b:
     build: ./matching-service
@@ -66,6 +68,8 @@ services:
     depends_on:
       matching-ambassador:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
   matching-service-c:
     build: ./matching-service
@@ -85,6 +89,8 @@ services:
       retries: 5
     depends_on:
       matching-ambassador:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
   matching-ambassador:
@@ -110,6 +116,9 @@ services:
     build: ./inventory-service
     ports:
       - "5200:5200"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
     healthcheck:
       test:
         [
