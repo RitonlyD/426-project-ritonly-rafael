@@ -1,5 +1,8 @@
 {
   "name": "matching-ambassador",
   "type": "module",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "prom-client": "^15.1.3"
+  }
 }
