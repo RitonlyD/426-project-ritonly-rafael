@@ -1,5 +1,6 @@
 import http from "node:http";
 import amqp from "amqplib";
+import client from "prom-client";
 
 const PORT = process.env.PORT || 4000;
 const AVAILABILITY_URL =
@@ -7,10 +8,38 @@ const AVAILABILITY_URL =
   "http://matching-ambassador:5000/availability"; // amb pattern, sharing this and listening on localhost:5000
 const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://rabbitmq:5672";
 const RESERVE_UNIT_QUEUE = "reserve-unit";
+const SERVICE_NAME = "matching-service";
+
+const log = (level, message, fields = {}) => {
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level,
+      service: SERVICE_NAME,
+      message,
+      ...fields,
+    }),
+  );
+};
+
+const register = new client.Registry();
+const httpRequestsTotal = new client.Counter({
+  name: "http_requests_total",
+  help: "Total HTTP requests received",
+  labelNames: ["service", "method", "route", "status_code"],
+  registers: [register],
+});
+const httpRequestDuration = new client.Histogram({
+  name: "http_request_duration_ms",
+  help: "HTTP request duration in milliseconds",
+  labelNames: ["service", "method", "route", "status_code"],
+  buckets: [50, 100, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000],
+  registers: [register],
+});
 
 const rabbitConnection = await amqp.connect(RABBITMQ_URL);
 rabbitConnection.on("error", (err) =>
-  console.error(`[matching-service] rabbitmq error: ${err.message}`),
+  log("error", "rabbitmq error", { error: err.message }),
 );
 const rabbitChannel = await rabbitConnection.createChannel();
 await rabbitChannel.assertQueue(RESERVE_UNIT_QUEUE, { durable: true });
@@ -54,9 +83,9 @@ const getAvailability = async (query) => {
     if (!r.ok) throw new Error(`ambassador ${r.status}`);
     return { source: "Ambassador", ...(await r.json()) };
   } catch (err) {
-    console.warn(
-      `[matching] availability lookup failed (${err.message}); synthetic fallback`,
-    );
+    log("warn", "availability lookup failed, using synthetic fallback", {
+      error: err.message,
+    });
     return {
       source: "synthetic-fallback",
       donors: random(4),
@@ -113,19 +142,40 @@ const readJSON = (req) =>
     });
   });
 
-const send = (res, code, obj) => {
-  res.writeHead(code, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(obj));
-};
-
 const server = http.createServer(async (req, res) => {
+  const start = process.hrtime.bigint();
   const path = req.url.split("?")[0];
+  const method = req.method;
 
-  if (req.method === "GET" && path === "/health") {
-    return send(res, 200, { status: "ok", service: "matching-service" });
+  if (method === "GET" && path === "/metrics") {
+    res.writeHead(200, { "Content-Type": register.contentType });
+    return res.end(await register.metrics());
   }
 
-  if (req.method === "POST" && path === "/match") {
+  const route =
+    path === "/health" ? "/health" : path === "/match" ? "/match" : "unmatched";
+
+  const send = (code, obj) => {
+    res.writeHead(code, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(obj));
+
+    const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+    const labels = { service: SERVICE_NAME, method, route, status_code: code };
+    httpRequestsTotal.inc(labels);
+    httpRequestDuration.observe(labels, durationMs);
+    log("info", "request completed", {
+      method,
+      path,
+      statusCode: code,
+      responseTimeMs: Math.round(durationMs),
+    });
+  };
+
+  if (method === "GET" && path === "/health") {
+    return send(200, { status: "ok", service: SERVICE_NAME });
+  }
+
+  if (method === "POST" && path === "/match") {
     const body = await readJSON(req);
     const request = {
       patientId: body.patientId || `PT-${10000 + random(90000)}`,
@@ -152,12 +202,10 @@ const server = http.createServer(async (req, res) => {
         Buffer.from(JSON.stringify(reserveMessage)),
         { persistent: true },
       );
-      console.log(
-        `[matching-service] enqueued reserve-unit requestId=${requestId} unitId=${match.unitId}`,
-      );
+      log("info", "enqueued reserve-unit", { requestId, unitId: match.unitId });
     }
 
-    return send(res, 200, {
+    return send(200, {
       requestId,
       servedBy: process.env.REPLICA || process.env.HOSTNAME || "unknown", // which replica answered
       patient: request,
@@ -167,9 +215,7 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  return send(res, 404, { error: "not found" });
+  return send(404, { error: "not found" });
 });
 
-server.listen(PORT, () =>
-  console.log(`matching-service listening on: ${PORT}`),
-);
+server.listen(PORT, () => log("info", `matching-service listening on ${PORT}`));
