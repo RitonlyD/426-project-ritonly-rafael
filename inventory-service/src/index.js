@@ -1,9 +1,38 @@
 import http from "node:http";
 import amqp from "amqplib";
+import client from "prom-client";
 
 const PORT = process.env.PORT || 5200;
 const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://rabbitmq:5672";
 const RESERVE_UNIT_QUEUE = "reserve-unit";
+const SERVICE_NAME = "inventory-service";
+
+const log = (level, message, fields = {}) => {
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level,
+      service: SERVICE_NAME,
+      message,
+      ...fields,
+    }),
+  );
+};
+
+const register = new client.Registry();
+const httpRequestsTotal = new client.Counter({
+  name: "http_requests_total",
+  help: "Total HTTP requests received",
+  labelNames: ["service", "method", "route", "status_code"],
+  registers: [register],
+});
+const httpRequestDuration = new client.Histogram({
+  name: "http_request_duration_ms",
+  help: "HTTP request duration in milliseconds",
+  labelNames: ["service", "method", "route", "status_code"],
+  buckets: [50, 100, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000],
+  registers: [register],
+});
 
 const BLOOD_TYPES = ["O-", "O+", "A-", "A+", "B-", "B+", "AB-", "AB+"];
 const ANTIGENS = [
@@ -48,9 +77,6 @@ const makeUnit = (id) => ({
 const units = Array.from({ length: 60 }, (_, i) => makeUnit(i));
 const reservations = new Map();
 
-// Shared by the sync POST /inventory/reserve endpoint and the async
-// reserve-unit consumer, both of which apply the same idempotent
-// reservation semantics keyed by a caller-supplied key.
 const applyReservation = (key, { unitId, bloodType }) => {
   if (reservations.has(key)) {
     return { result: reservations.get(key), replayed: true };
@@ -79,7 +105,7 @@ const applyReservation = (key, { unitId, bloodType }) => {
 
 const rabbitConnection = await amqp.connect(RABBITMQ_URL);
 rabbitConnection.on("error", (err) =>
-  console.error(`[inventory-service] rabbitmq error: ${err.message}`),
+  log("error", "rabbitmq connection error", { error: err.message }),
 );
 const rabbitChannel = await rabbitConnection.createChannel();
 await rabbitChannel.assertQueue(RESERVE_UNIT_QUEUE, { durable: true });
@@ -88,16 +114,23 @@ rabbitChannel.consume(RESERVE_UNIT_QUEUE, (msg) => {
   if (!msg) return;
 
   const message = JSON.parse(msg.content.toString());
-  console.log(
-    `[inventory-service] processing reserve-unit requestId=${message.requestId} unitId=${message.unitId}`,
-  );
+  log("info", "processing reserve-unit", {
+    requestId: message.requestId,
+    unitId: message.unitId,
+  });
 
   const { result } = applyReservation(message.requestId, message);
-  console.log(
-    result.reserved
-      ? `[inventory-service] reserve-unit applied requestId=${message.requestId} unitId=${result.unitId}`
-      : `[inventory-service] reserve-unit failed requestId=${message.requestId}: ${result.error}`,
-  );
+  if (result.reserved) {
+    log("info", "reserve-unit applied", {
+      requestId: message.requestId,
+      unitId: result.unitId,
+    });
+  } else {
+    log("warn", "reserve-unit failed", {
+      requestId: message.requestId,
+      error: result.error,
+    });
+  }
 
   rabbitChannel.ack(msg);
 });
@@ -115,20 +148,47 @@ const readJSON = (req) =>
     });
   });
 
-const send = (res, code, obj) => {
-  res.writeHead(code, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(obj));
-};
-
 const server = http.createServer(async (req, res) => {
+  const start = process.hrtime.bigint();
   const url = new URL(req.url, "http://localhost");
   const path = url.pathname;
+  const method = req.method;
 
-  if (req.method === "GET" && path === "/health") {
-    return send(res, 200, { status: "ok", service: "inventory-service" });
+  if (method === "GET" && path === "/metrics") {
+    res.writeHead(200, { "Content-Type": register.contentType });
+    return res.end(await register.metrics());
   }
 
-  if (req.method === "GET" && path === "/inventory") {
+  const route =
+    path === "/health"
+      ? "/health"
+      : path === "/inventory"
+        ? "/inventory"
+        : path === "/inventory/reserve"
+          ? "/inventory/reserve"
+          : "unmatched";
+
+  const send = (code, obj) => {
+    res.writeHead(code, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(obj));
+
+    const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+    const labels = { service: SERVICE_NAME, method, route, status_code: code };
+    httpRequestsTotal.inc(labels);
+    httpRequestDuration.observe(labels, durationMs);
+    log("info", "request completed", {
+      method,
+      path,
+      statusCode: code,
+      responseTimeMs: Math.round(durationMs),
+    });
+  };
+
+  if (method === "GET" && path === "/health") {
+    return send(200, { status: "ok", service: SERVICE_NAME });
+  }
+
+  if (method === "GET" && path === "/inventory") {
     const bloodType = url.searchParams.get("bloodType") || "any";
     const latencyMS = await simulateLookupLatency();
 
@@ -136,7 +196,7 @@ const server = http.createServer(async (req, res) => {
       (u) => !u.reserved && (bloodType === "any" || u.bloodType === bloodType),
     );
 
-    return send(res, 200, {
+    return send(200, {
       bloodType,
       available: matches.length,
       units: matches.slice(0, 5),
@@ -144,32 +204,32 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  if (req.method === "POST" && path === "/inventory/reserve") {
+  if (method === "POST" && path === "/inventory/reserve") {
     const body = await readJSON(req);
     const idempotencyKey = body.idempotencyKey;
 
     if (!idempotencyKey) {
-      return send(res, 400, { error: "idempotencyKey is required" });
+      return send(400, { error: "idempotencyKey is required" });
     }
 
     const { result, replayed } = applyReservation(idempotencyKey, body);
 
     if (replayed) {
-      console.log(`[inventory-service] replayed reservation ${idempotencyKey}`);
-      return send(res, 200, result);
+      log("info", "replayed reservation", { idempotencyKey });
+      return send(200, result);
     }
 
     if (!result.reserved) {
-      return send(res, 409, result);
+      return send(409, result);
     }
 
-    console.log(`[inventory-service] reserved ${result.unitId}`);
-    return send(res, 200, result);
+    log("info", "reserved unit", { unitId: result.unitId });
+    return send(200, result);
   }
 
-  return send(res, 404, { error: "not found" });
+  return send(404, { error: "not found" });
 });
 
 server.listen(PORT, () =>
-  console.log(`inventory-service listening on: ${PORT}`),
+  log("info", `inventory-service listening on ${PORT}`),
 );
