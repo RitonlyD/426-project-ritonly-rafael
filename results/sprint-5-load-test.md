@@ -139,3 +139,158 @@ random `unitId` for `inventory_unit` matches rather than reserving one of
 behavior from Sprint 4, not a regression introduced by this load test; it
 doesn't affect the `POST /match` response, which returns successfully
 either way, so it isn't reflected in the 0% error rate above.)
+
+## donor-service — GET /donors/available (Redis cache-aside)
+
+Test: `load-tests/sprint-5-load.js`, `donor_cache` scenario — 10 VUs, 60s,
+run directly against donor-service. Run against the full Sprint 5 stack
+(RabbitMQ async path, real inventory-service, health checks on every
+service, Prometheus + Grafana instrumentation).
+
+k6 summary output (2026-08-13), `donor_cache` scenario:
+
+```
+  █ THRESHOLDS
+
+    http_req_duration{scenario:donor_cache}
+    ✓ 'p(95)<300' p(95)=2.66ms
+
+  █ TOTAL RESULTS
+
+    checks_total.......: 986     15.999962/s
+    checks_succeeded...: 100.00% 986 out of 986
+    checks_failed......: 0.00%   0 out of 986
+
+    ✓ status is 200
+
+    HTTP
+    http_req_duration..............: avg=231.95ms min=225.45µs med=993.2µs  p(90)=664.3ms  p(95)=755.92ms p(99)=870.59ms max=1.05s
+      { scenario:donor_cache }.....: avg=7.7ms    min=225.45µs med=626.83µs p(90)=1.44ms   p(95)=2.66ms   p(99)=273.86ms max=318.73ms
+    http_req_failed................: 0.00%  0 out of 986
+    http_reqs......................: 986    15.999962/s
+```
+
+Sample structured log output from the same run:
+
+```json
+{"timestamp":"2026-08-13T01:02:31.021Z","level":"info","service":"donor-service","message":"cache hit","cacheKey":"donors:available:O+"}
+{"timestamp":"2026-08-13T01:02:31.137Z","level":"info","service":"donor-service","message":"cache hit","cacheKey":"donors:available:A+"}
+```
+
+Cross-checked against Prometheus (donor-service's own view of *all* traffic
+it received during this run, `donor-service{route="/donors/available"}` —
+this includes both the 600 direct k6 requests tagged `donor_cache` and the
+386 additional indirect requests `matching-ambassador` made to it while
+resolving the `match` scenario's requests): p95 48.98ms, p99 243.61ms, 986
+total requests, 0 errors.
+
+### SLO comparison (docs/SLO.md)
+
+- **Latency SLO** (p95 < 300ms): met with wide margin from both views — the
+  k6-scenario-only p95 (2.66ms) and the full-traffic Prometheus p95
+  (48.98ms) are both far under the 300ms line.
+- **Reliability SLO** (99.5% success on the availability-update endpoint):
+  not directly exercised by this load test (the test only reads
+  `/donors/available`, it doesn't call `POST /donors/:id/availability`),
+  but the read path itself succeeded 100% of the time (986/986), so there's
+  no evidence against it either.
+
+### Sprint 3 vs. Sprint 5 comparison
+
+|              | Sprint 3 (30s) | Sprint 5 (60s) |
+| ------------ | -------------- | -------------- |
+| p50          | 2.11ms         | 0.63ms         |
+| p95          | 244.65ms       | 2.66ms         |
+| p99          | 322ms          | 273.86ms       |
+| Request rate | 9.43 req/s     | 10.0 req/s     |
+| Error rate   | 0%             | 0%             |
+
+The p95 drop (244.65ms → 2.66ms) is not a system improvement — it's a
+measurement artifact of the longer run. Sprint 3's report already flagged
+that ~7% of requests are cache misses (the fixed cost of the first request
+against each of the 4 blood types after the 20s TTL expires) and that this
+fixed miss proportion sits right at the p95 line on a short run. Doubling
+the run length to 60s doesn't change the miss rate, but it pushes the same
+absolute number of slow misses further down the percentile distribution,
+so they no longer land at p95 — they still show up at p99 (273.86ms),
+which is barely changed from Sprint 3's p99 (322ms) and is consistent with
+the same 80-300ms simulated miss latency as before. The caching behavior
+itself hasn't changed; the test duration changed what percentile the
+misses land on.
+
+### Interpretation
+
+The cache-aside pattern is working exactly as designed and there is no
+new bottleneck here. The real story this sprint is that `donor-service` is
+no longer only reached directly by clients — `matching-ambassador` now
+calls it on every `match` request too (confirmed by the gap between the
+600 k6-tagged requests and the 986 total Prometheus saw). Both call paths
+share the same Redis cache and the same 4-blood-type key space, so the
+ambassador's traffic is, if anything, *helping* the client-facing p95 by
+keeping keys warm. If a future sprint widened the blood-type space (all 8
+real types instead of 4, or added phenotype to the cache key), the hit
+rate would drop and both p95 and p99 would move back toward Sprint 3's
+numbers or worse — the current comfortable margin depends on a narrow key
+space, not just on caching existing.
+
+## inventory-service — GET /inventory (indirect, via matching-ambassador)
+
+`inventory-service` isn't hit directly by `load-tests/sprint-5-load.js` —
+it's only reached indirectly, the same way `matching-ambassador` is: every
+`match` scenario request triggers one ambassador call to
+`GET /inventory?bloodType=...`. Cross-checked against Prometheus
+(`inventory-service{route="/inventory"}`) for the same run reported above:
+
+- p95: 385.76ms
+- p99: 398.47ms
+- Total requests: 386 (one per `match` scenario iteration, as expected)
+- Errors: 0 (0 of 386)
+
+Sample structured log output from the async reservation path, same run:
+
+```json
+{"timestamp":"2026-08-13T01:02:16.695Z","level":"info","service":"inventory-service","message":"processing reserve-unit","requestId":"req-8ca2f574","unitId":"UNIT-514444"}
+{"timestamp":"2026-08-13T01:02:16.695Z","level":"warn","service":"inventory-service","message":"reserve-unit failed","requestId":"req-8ca2f574","error":"no matching unit available"}
+```
+
+### SLO comparison (docs/SLO.md)
+
+- **Latency SLO** (GET /inventory, p95 < 400ms): met, but only just —
+  385.76ms leaves under 4% headroom, and p99 (398.47ms) is essentially
+  sitting on the 400ms line.
+- **Reliability SLO** (POST /inventory/reserve, 99% success): the
+  synchronous endpoint itself wasn't exercised by this load test (only the
+  async `reserve-unit` consumer was, via the RabbitMQ path), so this SLO
+  isn't directly measured here. Separately, the async reservations
+  themselves fail consistently (see Interpretation below) — but that
+  failure is a business-logic outcome (`reserved: false`), not an endpoint
+  error, and doesn't correspond to what this SLO is measuring.
+- No Sprint 3 comparison exists for this service — `inventory-service`
+  wasn't built until Sprint 4.
+
+### Interpretation
+
+The near-zero headroom on the latency SLO isn't a load-related bottleneck,
+it's arithmetic. `inventory-service`'s simulated lookup latency is drawn
+uniformly from `100 + random(300)`, i.e. a flat distribution over
+[100ms, 400ms). The 95th percentile of a uniform distribution over that
+range is mathematically `100 + 0.95 * 300 = 385ms` regardless of how many
+requests hit it or how fast they arrive — which is almost exactly the
+385.76ms measured. The 400ms SLO was written as the same number as the
+upper bound of the latency simulation itself, which leaves it with
+essentially no margin by construction, independent of real load. This
+won't get worse under heavier traffic, but it also can't be fixed by
+scaling `inventory-service` horizontally the way `matching-service` was in
+Sprint 3 — the fix is either widening the SLO's margin against its own
+generator (e.g. targeting 450ms) or narrowing the generator's range (e.g.
+`100 + random(200)`) so its own p95 sits meaningfully under the target
+instead of defining it.
+
+Separately, and consistent with what Sprint 4's report already noted: the
+async reservation path fires and completes on every run (confirmed by the
+`processing reserve-unit` / `reserve-unit failed` log pairs above,
+observable end to end), but the reservation itself fails every time
+because `matching-service` sends a fabricated `unitId` rather than a real
+one from `inventory-service`'s 60 seeded units. This doesn't affect
+`POST /match`'s response or this SLO measurement, but it's a known,
+carried-forward gap, not something introduced this sprint.
