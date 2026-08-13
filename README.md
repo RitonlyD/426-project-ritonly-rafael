@@ -80,11 +80,25 @@ RabbitMQ instance instead of the containerized one).
 | `INVENTORY_URL` | inventory-service base URL | `http://inventory-service:5200` | Falls back to the compose DNS name shown |
 | `MAX_RETRIES` | Retry attempts against a downstream service before failing over | `2` | Falls back to `2` |
 
-### donor-service / inventory-service
+### donor-service
 
-_TODO (Ritonly): `PORT`, `REDIS_URL` (donor-service), `RABBITMQ_URL`
-(inventory-service), plus the fault-injection toggle from
-`results/sprint-4-failure.md`, in the same table format as above._
+| Variable | What it is | Dev default | If missing |
+| -------- | ---------- | ------------ | ----------- |
+| `PORT` | HTTP listen port | `5100` | Falls back to `5100` |
+| `REDIS_URL` | Redis connection string used for the cache-aside donor-availability lookup | `redis://redis:6379` | Falls back to the compose DNS name shown |
+
+`donor-service` also has a runtime fault-injection toggle, not an
+environment variable — `POST /admin/fail` flips an in-memory flag that
+makes `GET /donors/available` return `503` while active. See
+[`results/sprint-4-failure.md`](results/sprint-4-failure.md) for the full
+scenario and how the rest of the system responds to it.
+
+### inventory-service
+
+| Variable | What it is | Dev default | If missing |
+| -------- | ---------- | ------------ | ----------- |
+| `PORT` | HTTP listen port | `5200` | Falls back to `5200` |
+| `RABBITMQ_URL` | RabbitMQ connection string used by the `reserve-unit` consumer | `amqp://rabbitmq:5672` | Falls back to the compose DNS name shown |
 
 ## Observability
 
