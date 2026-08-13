@@ -8,23 +8,29 @@ inventory-service: Keeps a track of 'Blood Units' by blood type and phenotype at
 
 ## System Diagram
 
-Services built as of Sprint 4: `donor-service`, `matching-service`, and
-`inventory-service` (now built — previously shown as planned only),
-connected through the `matching-ambassador` (ambassador pattern sitting in
-front of `matching-service`). `donor-service` caches its availability
-lookups in Redis (cache-aside, keyed by blood type). `matching-service`
-runs as three replicas (`matching-service-a/b/c`) behind Caddy, which
-load-balances incoming requests round-robin across them; those replicas now
-gate on `matching-ambassador`'s own health check rather than just its
-startup.
+Final system, as of Sprint 5. Four custom services: `donor-service`,
+`matching-service`, `inventory-service`, and `matching-ambassador`
+(ambassador pattern sitting in front of `matching-service`).
+`donor-service` caches its availability lookups in Redis (cache-aside,
+keyed by blood type). `matching-service` runs as three replicas
+(`matching-service-a/b/c`) behind Caddy, which load-balances incoming
+requests round-robin across them; those replicas gate on
+`matching-ambassador`'s own health check rather than just its startup.
 
-Sprint 4 adds an asynchronous path alongside the existing synchronous
-request/response flow: when a match resolves to an `inventory_unit`,
-`matching-service` publishes a `reserve-unit` message to a RabbitMQ work
-queue instead of reserving it synchronously, and logs the enqueue.
-`inventory-service` consumes that queue independently, applies the
-reservation, logs processing, and acks — the match response returns to the
-client without waiting on the reservation write.
+An asynchronous path runs alongside the synchronous request/response flow:
+when a match resolves to an `inventory_unit`, `matching-service` publishes
+a `reserve-unit` message to a RabbitMQ work queue instead of reserving it
+synchronously, and logs the enqueue. `inventory-service` consumes that
+queue independently, applies the reservation, logs processing, and acks —
+the match response returns to the client without waiting on the
+reservation write.
+
+Sprint 5 adds observability: every custom service exposes `GET /metrics`
+(a request counter and a response-time histogram, both in Prometheus
+format) and emits structured JSON logs. Prometheus scrapes all four
+services every 10s; Grafana reads from Prometheus and renders a dashboard
+(auto-provisioned from a committed JSON export, no manual setup) showing
+request rate, error rate, and p95 latency for the main request path.
 
 ```mermaid
 flowchart LR
@@ -42,6 +48,8 @@ flowchart LR
     DonorCache[(Redis cache)]
     Inventory[inventory-service]
     Queue[(RabbitMQ<br/>reserve-unit queue)]
+    Prom[(Prometheus)]
+    Graf[Grafana dashboard]
 
     Client -->|POST /match| Caddy_LB
     MatchingA -->|GET /availability| Ambassador
@@ -55,4 +63,12 @@ flowchart LR
     MatchingB -.->|publish reserve-unit| Queue
     MatchingC -.->|publish reserve-unit| Queue
     Queue -.->|consume, apply, ack| Inventory
+
+    Prom -.->|scrape /metrics| MatchingA
+    Prom -.->|scrape /metrics| MatchingB
+    Prom -.->|scrape /metrics| MatchingC
+    Prom -.->|scrape /metrics| Ambassador
+    Prom -.->|scrape /metrics| Donor
+    Prom -.->|scrape /metrics| Inventory
+    Graf -->|query| Prom
 ```
